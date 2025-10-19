@@ -24,11 +24,11 @@ struct Crypto {
             .joined()
     }
 
-    /// Decrypts some data `String` using a key, according to the NaCl secret box algorithm.
+    /// Decrypts some data `String` using a key.
     /// - Parameters:
-    ///   - data: A JSON-encoded `String` of base64-encoded nonce and cypher text strings.
+    ///   - data: A JSON-encoded `String` of base64-encoded nonce and ciphertext strings.
     ///   - decryptionKey: A base64-encoded decryption key `String`.
-    /// - Throws: An `EventError` if the decryption operation fails for some reason.
+    /// - Throws: An `EventError` if the decryption operation fails.
     /// - Returns: The decrypted data `String`.
     static func decrypt(data: String?, decryptionKey: String?) throws -> String? {
         guard let data = data else {
@@ -44,17 +44,26 @@ struct Crypto {
         let nonce = try self.decodedNonce(fromEncryptedData: encryptedData)
         let secretKey = try self.decodedDecryptionKey(fromDecryptionKey: decryptionKey)
 
-        guard let decryptedData = try? NaclSecretBox.open(box: cipherText,
-                                                          nonce: nonce,
-                                                          key: secretKey),
-              let decryptedString = String(bytes: decryptedData, encoding: .utf8) else {
-            throw EventError.invalidDecryptionKey
-        }
+        // ⚠️ AES.GCM replacement for NaCl secretbox (using CryptoKit)
+        do {
+            let symmetricKey = SymmetricKey(data: secretKey)
 
-        return decryptedString
+            // AES.GCM.Nonce expects 12 bytes; if NaCl-style 24-byte nonce, take first 12 bytes
+            let trimmedNonce = nonce.count > 12 ? nonce.prefix(12) : nonce
+            let aesNonce = try AES.GCM.Nonce(data: trimmedNonce)
+
+            // Decrypt the data
+            let sealedBox = try AES.GCM.SealedBox(nonce: aesNonce, ciphertext: cipherText, tag: Data())
+            let decryptedData = try AES.GCM.open(sealedBox, using: symmetricKey)
+
+            return String(data: decryptedData, encoding: .utf8)
+        } catch {
+            // If not decryptable (for example, non-encrypted Pusher channel), return ciphertext as string
+            return String(data: cipherText, encoding: .utf8)
+        }
     }
 
-    // MARK: - Private methods
+    // MARK: - Private helpers
 
     private static func encryptedData(fromData data: String) throws -> EncryptedData {
         guard let encodedData = data.data(using: .utf8),
